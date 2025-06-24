@@ -9,8 +9,8 @@ Find which LAS tiles cover either:
 Reads a .shp index of tiles, reprojects from EPSG:4326,
 reports coverage stats, lists needed tiles, and always
 generates a coverage_map.tiff with a contextual basemap.
-When using CSV mode, it takes the convex hull of
-your points+path so there are no “islands” of missing data.
+In CSV mode, takes the convex hull of your points+path to
+fill any interior gaps, and plots the points as dots on the map.
 """
 
 import argparse
@@ -81,14 +81,14 @@ def build_query_geometry(args):
         union = unary_union(pts + [path])
         # take convex hull to fill any interior gaps
         geom = union.convex_hull
-        return geom, False
+        return geom, False, pts
     else:
         if None in (args.miny, args.maxx, args.maxy):
             raise ValueError(
                 "Must specify --minx/--miny/--maxx/--maxy for bbox mode"
             )
         geom = box(args.minx, args.miny, args.maxx, args.maxy).buffer(args.buffer)
-        return geom, True
+        return geom, True, []
 
 
 def main():
@@ -100,7 +100,7 @@ def main():
         sys.exit(1)
 
     try:
-        query_geom_ll, is_bbox = build_query_geometry(args)
+        query_geom_ll, is_bbox, point_list = build_query_geometry(args)
     except Exception as e:
         print(Fore.RED + str(e))
         sys.exit(1)
@@ -180,15 +180,23 @@ def main():
         gdf_query = gpd.GeoDataFrame(
             {"geometry": [query_geom]}, crs=src.crs
         )
-
-        # reproject to Web Mercator
+        # also GeoDataFrame of the raw points for plotting
+        gdf_pts = gpd.GeoDataFrame(
+            {"geometry": point_list}, crs="EPSG:4326"
+        )
+        
+        # reproject
         for gdf in (gdf_all, gdf_sel, gdf_query):
             gdf.to_crs(epsg=3857, inplace=True)
+        if not gdf_pts.empty:
+            gdf_pts = gdf_pts.to_crs(epsg=3857)
 
         fig, ax = plt.subplots(1, 1, figsize=(12, 12))
         gdf_all.boundary.plot(ax=ax, color="lightgray", linewidth=0.5)
         gdf_sel.plot(ax=ax, color="blue", alpha=0.5, edgecolor="navy")
         gdf_query.boundary.plot(ax=ax, color="red", linewidth=2)
+        if not gdf_pts.empty:
+            gdf_pts.plot(ax=ax, color="yellow", marker="o", markersize=50, edgecolor="black")
 
         ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
         ax.set_title("Coverage map")

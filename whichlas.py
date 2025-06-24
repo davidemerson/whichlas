@@ -34,7 +34,7 @@ def parse_args():
     )
     grp = p.add_mutually_exclusive_group(required=True)
     grp.add_argument(
-        "--csv", help="Path to CSV with columns 'lon','lat' to define points & path"
+        "--csv", help="Path to CSV with point coordinates (e.g. lon,lat or x,y)"
     )
     grp.add_argument(
         "--minx", type=float, help="Lon min (for bbox search once you specify all four)"
@@ -45,6 +45,8 @@ def parse_args():
     p.add_argument(
         "--buffer", type=float, default=0.0, help="Buffer in degrees (bbox only)"
     )
+    p.add_argument("--csvx", help="Column name for point X (lon) if auto-detect fails")
+    p.add_argument("--csvy", help="Column name for point Y (lat) if auto-detect fails")
     p.add_argument("--shp", required=True, help="Index .shp (with .dbf/.shx/.prj)")
     p.add_argument("--out", default="tiles.txt", help="Write filenames here")
     return p.parse_args()
@@ -60,14 +62,27 @@ def columns(lst, cols=4, width=16):
 def build_query_geometry(args):
     if args.csv:
         df = pd.read_csv(args.csv)
-        pts = [Point(x, y) for x, y in zip(df["lon"], df["lat"])]
+        # auto-detect X/Y columns
+        xcol = args.csvx or next(
+            (c for c in df.columns if c.lower() in ("lon", "longitude", "x", "lng")), None
+        )
+        ycol = args.csvy or next(
+            (c for c in df.columns if c.lower() in ("lat", "latitude", "y")), None
+        )
+        if not xcol or not ycol:
+            raise ValueError(
+                f"Couldn't find lon/lat columns in CSV. "
+                f"Please specify with --csvx and --csvy. Available: {', '.join(df.columns)}"
+            )
+        pts = [Point(x, y) for x, y in zip(df[xcol], df[ycol])]
         path = LineString([(p.x, p.y) for p in pts])
-        # union of points + path
         geom = path.union(unary_union(pts))
         return geom, False
     else:
         if None in (args.miny, args.maxx, args.maxy):
-            raise ValueError("Must specify --minx/--miny/--maxx/--maxy for bbox mode")
+            raise ValueError(
+                "Must specify --minx/--miny/--maxx/--maxy for bbox mode"
+            )
         geom = box(args.minx, args.miny, args.maxx, args.maxy).buffer(args.buffer)
         return geom, True
 
@@ -95,7 +110,9 @@ def main():
         transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
         query_geom = transform(transformer.transform, query_geom_ll)
 
-        fld = next((f for f in src.schema["properties"] if f.lower().startswith("file")), None)
+        fld = next(
+            (f for f in src.schema["properties"] if f.lower().startswith("file")), None
+        )
         if not fld:
             print(Fore.RED + "No file-name field in schema")
             sys.exit(1)
@@ -145,6 +162,7 @@ def main():
         ]
         if cov < 100:
             rows.append([Fore.RED + "WARNING", Fore.RED + "Partial coverage!"])
+
     print(Style.BRIGHT + tabulate(rows, tablefmt="plain"))
 
     # mapping if partial or in point mode
@@ -157,14 +175,11 @@ def main():
 
             gdf_all = gpd.read_file(str(shp))
             gdf_sel = gdf_all[gdf_all[fld].isin(set(hits))]
-
-            # prepare geometry layers
-            from shapely.geometry import mapping
             gdf_query = gpd.GeoDataFrame(
                 {"geometry": [query_geom]}, crs=src.crs
             )
 
-            # to web mercator
+            # reproject to Web Mercator
             for gdf in (gdf_all, gdf_sel, gdf_query):
                 gdf.to_crs(epsg=3857, inplace=True)
 

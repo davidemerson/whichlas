@@ -18,7 +18,7 @@ conda create -n whichlas python=3.9 -y
 conda activate whichlas
 
 # 3. Install dependencies
-pip install fiona shapely pyproj tabulate colorama geopandas matplotlib contextily
+pip install fiona shapely pyproj tabulate colorama geopandas matplotlib contextily pandas
 ````
 
 > **Note:** You need the four components of the shapefile index in the same folder:

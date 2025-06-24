@@ -7,8 +7,10 @@ Find which LAS tiles cover either:
   • a set of points & connecting path (--csv <file.csv>)
 
 Reads a .shp index of tiles, reprojects from EPSG:4326,
-reports coverage stats, lists needed tiles, and if coverage
-is partial produces coverage_map.tiff with a contextual basemap.
+reports coverage stats, lists needed tiles, and always
+generates a coverage_map.tiff with a contextual basemap.
+When using CSV mode, it takes the convex hull of
+your points+path so there are no “islands” of missing data.
 """
 
 import argparse
@@ -76,7 +78,9 @@ def build_query_geometry(args):
             )
         pts = [Point(x, y) for x, y in zip(df[xcol], df[ycol])]
         path = LineString([(p.x, p.y) for p in pts])
-        geom = path.union(unary_union(pts))
+        union = unary_union(pts + [path])
+        # take convex hull to fill any interior gaps
+        geom = union.convex_hull
         return geom, False
     else:
         if None in (args.miny, args.maxx, args.maxy):
@@ -165,40 +169,38 @@ def main():
 
     print(Style.BRIGHT + tabulate(rows, tablefmt="plain"))
 
-    # mapping if partial or in point mode
-    need_map = (is_bbox and cov < 100) or (not is_bbox)
-    if need_map:
-        try:
-            import geopandas as gpd
-            import matplotlib.pyplot as plt
-            import contextily as ctx
+    # always generate map
+    try:
+        import geopandas as gpd
+        import matplotlib.pyplot as plt
+        import contextily as ctx
 
-            gdf_all = gpd.read_file(str(shp))
-            gdf_sel = gdf_all[gdf_all[fld].isin(set(hits))]
-            gdf_query = gpd.GeoDataFrame(
-                {"geometry": [query_geom]}, crs=src.crs
-            )
+        gdf_all = gpd.read_file(str(shp))
+        gdf_sel = gdf_all[gdf_all[fld].isin(set(hits))]
+        gdf_query = gpd.GeoDataFrame(
+            {"geometry": [query_geom]}, crs=src.crs
+        )
 
-            # reproject to Web Mercator
-            for gdf in (gdf_all, gdf_sel, gdf_query):
-                gdf.to_crs(epsg=3857, inplace=True)
+        # reproject to Web Mercator
+        for gdf in (gdf_all, gdf_sel, gdf_query):
+            gdf.to_crs(epsg=3857, inplace=True)
 
-            fig, ax = plt.subplots(1, 1, figsize=(12, 12))
-            gdf_all.boundary.plot(ax=ax, color="lightgray", linewidth=0.5)
-            gdf_sel.plot(ax=ax, color="blue", alpha=0.5, edgecolor="navy")
-            gdf_query.boundary.plot(ax=ax, color="red", linewidth=2)
+        fig, ax = plt.subplots(1, 1, figsize=(12, 12))
+        gdf_all.boundary.plot(ax=ax, color="lightgray", linewidth=0.5)
+        gdf_sel.plot(ax=ax, color="blue", alpha=0.5, edgecolor="navy")
+        gdf_query.boundary.plot(ax=ax, color="red", linewidth=2)
 
-            ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
-            ax.set_title("Coverage map")
-            ax.set_axis_off()
+        ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
+        ax.set_title("Coverage map")
+        ax.set_axis_off()
 
-            outmap = Path("coverage_map.tiff")
-            fig.savefig(str(outmap), dpi=300, bbox_inches="tight")
-            print(Fore.GREEN + f"Wrote coverage map to {outmap}")
-            plt.close(fig)
+        outmap = Path("coverage_map.tiff")
+        fig.savefig(str(outmap), dpi=300, bbox_inches="tight")
+        print(Fore.GREEN + f"Wrote coverage map to {outmap}")
+        plt.close(fig)
 
-        except Exception as e:
-            print(Fore.YELLOW + "Warning: map generation failed:", e)
+    except Exception as e:
+        print(Fore.YELLOW + "Warning: map generation failed:", e)
 
     # list and write tiles
     uniq = sorted(set(hits))

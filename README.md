@@ -1,4 +1,3 @@
-````markdown
 # whichlas
 
 A command-line Python tool to tell you exactly which `.las` tiles you need to download to cover a given geographic bounding box. It reads a shapefile index of LIDAR tiles, reprojects your query from EPSG:4326 to the index’s CRS, computes coverage stats, and writes out the list of needed tile names.
@@ -74,37 +73,8 @@ This will:
    * Bounding-box area vs. total tile coverage area (km² & mi²)
    * Coverage % and overrun/underrun %
    * A red warning if coverage < 100%
+   * A map if coverage is < 100% so you can see what's not there
 
 2. List the needed tile names in neat columns.
 
 3. Write the tile list to `lasneeded.txt`.
-
-## What’s under the hood?
-
-1. **Auto-detects** the shapefile’s file-name attribute (any property starting with “file…”).
-2. **Reprojects** your lon/lat query from EPSG:4326 into the shapefile’s CRS via `pyproj` & `shapely`.
-3. **Computes**:
-
-   * Bounding-box area
-   * Union of all intersecting tile polygons
-   * Area overrun or underrun
-   * % of total index tiles used
-4. **Formats** output with `tabulate` and colorizes warnings with `colorama`.
-
-## Troubleshooting
-
-* **“Shapefile not found”**
-  Ensure your `--shp` path is correct and that `.dbf`/`.shx`/`.prj` live alongside.
-
-* **Coverage < 100%**
-  Tiles don’t fully cover your box. You may need to check:
-
-  * Buffer size
-  * Correct CRS / coordinate swap (lon vs. lat)
-
-* **Dependencies fail**
-  Make sure you’re in the `whichlas` Conda env and rerun:
-
-  ```bash
-  pip install fiona shapely pyproj tabulate colorama
-  ```

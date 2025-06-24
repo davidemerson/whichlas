@@ -2,12 +2,13 @@
 """
 whichlas.py
 
-Find which LAS tiles cover (or overlap) a given bounding box,
-reading from a .shp shapefile, reprojecting from EPSG:4326,
-reporting coverage with a compact, colorized summary, and
-if coverage is partial, generating a coverage_map.tiff that
-plots all index tiles, selected tiles, and the query bbox
-over an OpenStreetMap basemap layer for context.
+Find which LAS tiles cover either:
+  • a bounding box (--minx/--miny/--maxx/--maxy), or
+  • a set of points & connecting path (--csv <file.csv>)
+
+Reads a .shp index of tiles, reprojects from EPSG:4326,
+reports coverage stats, lists needed tiles, and if coverage
+is partial produces coverage_map.tiff with a contextual basemap.
 """
 
 import argparse
@@ -15,7 +16,8 @@ import sys
 from pathlib import Path
 
 import fiona
-from shapely.geometry import box, shape
+import pandas as pd
+from shapely.geometry import box, shape, Point, LineString
 from shapely.ops import transform, unary_union
 from pyproj import Transformer, CRS
 from tabulate import tabulate
@@ -27,22 +29,47 @@ FT2_TO_MI2 = 1 / (5280 ** 2)
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Which LAS tiles for my bbox?")
-    p.add_argument("--shp",   required=True, help="Index .shp (with .dbf/.shx/.prj)")
-    p.add_argument("--minx",  type=float, required=True, help="Lon min")
-    p.add_argument("--miny",  type=float, required=True, help="Lat min")
-    p.add_argument("--maxx",  type=float, required=True, help="Lon max")
-    p.add_argument("--maxy",  type=float, required=True, help="Lat max")
-    p.add_argument("--buffer", type=float, default=0.0, help="BBox buffer (deg)")
-    p.add_argument("--out",   default="tiles.txt", help="Write filenames here")
+    p = argparse.ArgumentParser(
+        description="Which LAS tiles cover a bbox or CSV of points+path?"
+    )
+    grp = p.add_mutually_exclusive_group(required=True)
+    grp.add_argument(
+        "--csv", help="Path to CSV with columns 'lon','lat' to define points & path"
+    )
+    grp.add_argument(
+        "--minx", type=float, help="Lon min (for bbox search once you specify all four)"
+    )
+    p.add_argument("--miny", type=float, help="Lat min")
+    p.add_argument("--maxx", type=float, help="Lon max")
+    p.add_argument("--maxy", type=float, help="Lat max")
+    p.add_argument(
+        "--buffer", type=float, default=0.0, help="Buffer in degrees (bbox only)"
+    )
+    p.add_argument("--shp", required=True, help="Index .shp (with .dbf/.shx/.prj)")
+    p.add_argument("--out", default="tiles.txt", help="Write filenames here")
     return p.parse_args()
 
 
 def columns(lst, cols=4, width=16):
     lines = []
     for i in range(0, len(lst), cols):
-        lines.append("".join(f"{s:<{width}}" for s in lst[i:i+cols]))
+        lines.append("".join(f"{s:<{width}}" for s in lst[i : i + cols]))
     return "\n".join(lines)
+
+
+def build_query_geometry(args):
+    if args.csv:
+        df = pd.read_csv(args.csv)
+        pts = [Point(x, y) for x, y in zip(df["lon"], df["lat"])]
+        path = LineString([(p.x, p.y) for p in pts])
+        # union of points + path
+        geom = path.union(unary_union(pts))
+        return geom, False
+    else:
+        if None in (args.miny, args.maxx, args.maxy):
+            raise ValueError("Must specify --minx/--miny/--maxx/--maxy for bbox mode")
+        geom = box(args.minx, args.miny, args.maxx, args.maxy).buffer(args.buffer)
+        return geom, True
 
 
 def main():
@@ -53,18 +80,20 @@ def main():
         print(Fore.RED + "Shapefile not found:", shp)
         sys.exit(1)
 
-    # Build the input bbox in lon/lat
-    bbox = box(args.minx, args.miny, args.maxx, args.maxy).buffer(args.buffer)
+    try:
+        query_geom_ll, is_bbox = build_query_geometry(args)
+    except Exception as e:
+        print(Fore.RED + str(e))
+        sys.exit(1)
 
     with fiona.open(str(shp)) as src:
         total_tiles = len(src)
-
         pj = CRS(src.crs)
-        epsg = pj.to_authority()
-        crs_label = f"{epsg[0]}:{epsg[1]} — {pj.name}" if epsg else pj.name
+        auth = pj.to_authority()
+        crs_label = f"{auth[0]}:{auth[1]} — {pj.name}" if auth else pj.name
 
         transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
-        qry = transform(transformer.transform, bbox)
+        query_geom = transform(transformer.transform, query_geom_ll)
 
         fld = next((f for f in src.schema["properties"] if f.lower().startswith("file")), None)
         if not fld:
@@ -74,7 +103,7 @@ def main():
         hits, geoms = [], []
         for feat in src:
             g = shape(feat["geometry"])
-            if g.intersects(qry):
+            if g.intersects(query_geom):
                 hits.append(feat["properties"][fld])
                 geoms.append(g)
 
@@ -82,69 +111,70 @@ def main():
         print(Fore.RED + "No tiles found.")
         sys.exit(0)
 
-    # Area calculations
-    area_ft2 = qry.area
-    km2_bbox = area_ft2 * FT2_TO_M2 / 1e6
-    mi2_bbox = area_ft2 * FT2_TO_MI2
+    # area metrics (feet²)
+    area_ft2 = query_geom.area
+    km2_q = area_ft2 * FT2_TO_M2 / 1e6
+    mi2_q = area_ft2 * FT2_TO_MI2
 
-    uni = unary_union(geoms)
-    area2_ft2 = uni.area
-    km2_tiles = area2_ft2 * FT2_TO_M2 / 1e6
-    mi2_tiles = area2_ft2 * FT2_TO_MI2
+    union_sel = unary_union(geoms)
+    area2_ft2 = union_sel.area
+    km2_t = area2_ft2 * FT2_TO_M2 / 1e6
+    mi2_t = area2_ft2 * FT2_TO_MI2
 
-    coverage_pct = area2_ft2 / area_ft2 * 100
-    overrun_pct = coverage_pct - 100
+    cov = area2_ft2 / area_ft2 * 100 if is_bbox else None
+    over = cov - 100 if is_bbox else None
 
-    used_tiles = len(set(hits))
-    pct_tiles = used_tiles / total_tiles * 100
+    used = len(set(hits))
+    pct_used = used / total_tiles * 100
 
-    # Summary table
+    # summary
     rows = [
-        ["CRS",                  crs_label],
+        ["CRS", crs_label],
         ["Total tiles in index", str(total_tiles)],
-        ["Tiles needed",          str(used_tiles)],
-        ["% of index used",       f"{pct_tiles:.1f}%"],
-        ["BBox km²",             f"{km2_bbox:.2f}"],
-        ["BBox mi²",             f"{mi2_bbox:.2f}"],
-        ["Tiles km²",            f"{km2_tiles:.2f}"],
-        ["Tiles mi²",            f"{mi2_tiles:.2f}"],
-        ["Coverage",             f"{coverage_pct:.1f}%"],
-        ["Overrun",              f"{overrun_pct:.1f}%"],
+        ["Tiles needed", str(used)],
+        ["% of index used", f"{pct_used:.1f}%"],
     ]
-    if coverage_pct < 100:
-        rows.append([Fore.RED + "WARNING", Fore.RED + "Partial coverage!"])
-
+    if is_bbox:
+        rows += [
+            ["BBox km²", f"{km2_q:.2f}"],
+            ["BBox mi²", f"{mi2_q:.2f}"],
+            ["Tiles km²", f"{km2_t:.2f}"],
+            ["Tiles mi²", f"{mi2_t:.2f}"],
+            ["Coverage", f"{cov:.1f}%"],
+            ["Overrun", f"{over:.1f}%"],
+        ]
+        if cov < 100:
+            rows.append([Fore.RED + "WARNING", Fore.RED + "Partial coverage!"])
     print(Style.BRIGHT + tabulate(rows, tablefmt="plain"))
 
-    # Generate coverage map if partial
-    if coverage_pct < 100:
+    # mapping if partial or in point mode
+    need_map = (is_bbox and cov < 100) or (not is_bbox)
+    if need_map:
         try:
             import geopandas as gpd
             import matplotlib.pyplot as plt
             import contextily as ctx
 
-            # Load index and selected tiles
             gdf_all = gpd.read_file(str(shp))
             gdf_sel = gdf_all[gdf_all[fld].isin(set(hits))]
 
-            # Query bbox
-            gdf_box = gpd.GeoDataFrame({"geometry": [qry]}, crs=src.crs)
+            # prepare geometry layers
+            from shapely.geometry import mapping
+            gdf_query = gpd.GeoDataFrame(
+                {"geometry": [query_geom]}, crs=src.crs
+            )
 
-            # Reproject to Web Mercator
-            gdf_all = gdf_all.to_crs(epsg=3857)
-            gdf_sel = gdf_sel.to_crs(epsg=3857)
-            gdf_box = gdf_box.to_crs(epsg=3857)
+            # to web mercator
+            for gdf in (gdf_all, gdf_sel, gdf_query):
+                gdf.to_crs(epsg=3857, inplace=True)
 
-            # Plot
             fig, ax = plt.subplots(1, 1, figsize=(12, 12))
             gdf_all.boundary.plot(ax=ax, color="lightgray", linewidth=0.5)
             gdf_sel.plot(ax=ax, color="blue", alpha=0.5, edgecolor="navy")
-            gdf_box.boundary.plot(ax=ax, color="red", linewidth=2)
+            gdf_query.boundary.plot(ax=ax, color="red", linewidth=2)
 
-            # Add OSM basemap
             ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
-
-            ax.set_title("Tile coverage vs. Query bounding box")
+            ax.set_title("Coverage map")
             ax.set_axis_off()
 
             outmap = Path("coverage_map.tiff")
@@ -153,17 +183,19 @@ def main():
             plt.close(fig)
 
         except Exception as e:
-            print(Fore.YELLOW + "Warning: failed to write coverage_map.tiff:", e)
+            print(Fore.YELLOW + "Warning: map generation failed:", e)
 
-    # Print tile list
+    # list and write tiles
     uniq = sorted(set(hits))
     print("\n" + Style.BRIGHT + "Tiles:")
     print(columns(uniq))
 
-    # Write to file
     with open(args.out, "w") as f:
         f.write("\n".join(uniq))
-    print(Fore.GREEN + f"\nList written to {args.out} ({used_tiles}/{total_tiles} tiles, {pct_tiles:.1f}% of index)")
+    print(
+        Fore.GREEN
+        + f"\nList written to {args.out} ({used}/{total_tiles} tiles, {pct_used:.1f}% of index)"
+    )
 
 
 if __name__ == "__main__":

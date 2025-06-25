@@ -213,22 +213,31 @@ def generate_coverage_map(gdf_all, gdf_sel, gdf_query, gdf_pts, output_path="cov
         return False
         
     try:
+        # Make copies to avoid modifying original dataframes
+        gdf_all_map = gdf_all.copy()
+        gdf_sel_map = gdf_sel.copy()
+        gdf_query_map = gdf_query.copy()
+        
         # reproject to Web Mercator for mapping
-        for gdf in (gdf_all, gdf_sel, gdf_query):
-            gdf.to_crs(epsg=3857, inplace=True)
+        gdf_all_map = gdf_all_map.to_crs(epsg=3857)
+        gdf_sel_map = gdf_sel_map.to_crs(epsg=3857)
+        gdf_query_map = gdf_query_map.to_crs(epsg=3857)
+        
         if not gdf_pts.empty:
-            gdf_pts = gdf_pts.to_crs(epsg=3857)
+            gdf_pts_map = gdf_pts.to_crs(epsg=3857)
+        else:
+            gdf_pts_map = gdf_pts
 
         fig, ax = plt.subplots(1, 1, figsize=(12, 12))
         
         # Plot layers
-        gdf_all.boundary.plot(ax=ax, color="lightgray", linewidth=0.5, alpha=0.7)
-        gdf_sel.plot(ax=ax, color="blue", alpha=0.6, edgecolor="navy", linewidth=1)
-        gdf_query.boundary.plot(ax=ax, color="red", linewidth=2.5)
+        gdf_all_map.boundary.plot(ax=ax, color="lightgray", linewidth=0.5, alpha=0.7)
+        gdf_sel_map.plot(ax=ax, color="blue", alpha=0.6, edgecolor="navy", linewidth=1)
+        gdf_query_map.boundary.plot(ax=ax, color="red", linewidth=2.5)
         
-        if not gdf_pts.empty:
-            gdf_pts.plot(ax=ax, color="yellow", marker="o", markersize=60, 
-                        edgecolor="black", linewidth=1.5)
+        if not gdf_pts_map.empty:
+            gdf_pts_map.plot(ax=ax, color="yellow", marker="o", markersize=60, 
+                           edgecolor="black", linewidth=1.5)
 
         # Add basemap
         ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik, alpha=0.8)
@@ -348,7 +357,8 @@ def main():
     if not args.no_map and HAS_MAPPING:
         try:
             gdf_all = gpd.read_file(str(shp))
-            gdf_sel = gdf_all[gdf_all[fld].isin(set(hits))]
+            # Use .copy() to avoid SettingWithCopyWarning
+            gdf_sel = gdf_all[gdf_all[fld].isin(set(hits))].copy()
             gdf_query = gpd.GeoDataFrame(
                 {"geometry": [query_geom]}, crs=pj
             )
